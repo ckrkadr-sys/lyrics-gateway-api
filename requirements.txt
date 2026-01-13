@@ -3,4 +3,5 @@ uvicorn
 requests
 beautifulsoup4
 google-generative-ai
+python-dotenv
 duckduckgo-search
