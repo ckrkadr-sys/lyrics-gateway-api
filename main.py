@@ -1,17 +1,26 @@
 import os
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
 from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS
+from duckduckgo_search import DDGS # Eski adıyla import çalışır ama pip paketi ddgs'dir
 import time
 
 app = FastAPI()
 
-# API Key'i al
+# --- CORS AYARLARI ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Cache Ayarları
+# Cache (Hafıza)
 lyric_cache = {}
 CACHE_DURATION = 3600 * 24 * 7  # 7 Gün
 
@@ -23,8 +32,8 @@ def clean_with_gemini(dirty_text):
     if not GEMINI_API_KEY:
         return dirty_text
     
-    # KÜTÜPHANE YERİNE DOĞRUDAN REST API KULLANIYORUZ
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    # DÜZELTME: Model ismini 'gemini-pro' olarak değiştirdik (Daha kararlı)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
     
     prompt = f"""
     Aşağıdaki metin bir web sitesinden çekildi. İçinde menüler, reklamlar olabilir.
@@ -45,11 +54,10 @@ def clean_with_gemini(dirty_text):
         response = requests.post(url, json=payload, headers={'Content-Type': 'application/json'})
         if response.status_code == 200:
             data = response.json()
-            # Cevabı ayıkla
             return data['candidates'][0]['content']['parts'][0]['text']
         else:
             print(f"Gemini API Hatası: {response.text}")
-            return dirty_text
+            return dirty_text # Hata olursa ham metni döndür
     except Exception as e:
         print(f"Bağlantı Hatası: {e}")
         return dirty_text
@@ -59,6 +67,7 @@ def scrape_lyrics(artist, title):
     print(f"Aranıyor: {query}")
     
     try:
+        # DDGS kullanımı
         results = DDGS().text(query, max_results=3)
         if not results:
             return None
@@ -72,11 +81,13 @@ def scrape_lyrics(artist, title):
         
         soup = BeautifulSoup(page.content, 'html.parser')
         
+        # Script ve style etiketlerini temizle
         for script in soup(["script", "style"]):
             script.decompose()
             
         text = soup.get_text()
         
+        # Basit boşluk temizliği
         lines = (line.strip() for line in text.splitlines())
         chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
         clean_text = '\n'.join(chunk for chunk in chunks if chunk)
@@ -89,24 +100,28 @@ def scrape_lyrics(artist, title):
 
 @app.get("/")
 def read_root():
-    return {"status": "LyricMaster API is running (No-Lib Version)"}
+    return {"status": "LyricMaster API is running"}
 
 @app.get("/get_lyrics")
 def get_lyrics(artist: str, title: str):
     cache_key = f"{artist.lower().strip()}_{title.lower().strip()}"
     
+    # Cache Kontrol
     if cache_key in lyric_cache:
         cached_item = lyric_cache[cache_key]
         if time.time() - cached_item['timestamp'] < CACHE_DURATION:
             return {"lyrics": cached_item['lyrics'], "source": "cache"}
 
+    # Scrape İşlemi
     raw_lyrics = scrape_lyrics(artist, title)
     
     if not raw_lyrics:
         raise HTTPException(status_code=404, detail="Lyrics not found")
     
+    # Temizleme
     final_lyrics = clean_with_gemini(raw_lyrics)
     
+    # Cache Kayıt
     lyric_cache[cache_key] = {
         "lyrics": final_lyrics,
         "timestamp": time.time()
