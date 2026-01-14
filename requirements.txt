@@ -2,6 +2,6 @@ fastapi
 uvicorn
 requests
 beautifulsoup4
-google-generative-ai
+ddgs
 python-dotenv
-duckduckgo-search
+pydantic
