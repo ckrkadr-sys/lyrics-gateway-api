@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
 from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS # Eski adıyla import çalışır ama pip paketi ddgs'dir
+from duckduckgo_search import DDGS
 import time
 
 app = FastAPI()
@@ -20,35 +20,36 @@ app.add_middleware(
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Cache (Hafıza)
+# Cache
 lyric_cache = {}
-CACHE_DURATION = 3600 * 24 * 7  # 7 Gün
+CACHE_DURATION = 3600 * 24 * 7 
 
+# --- DATA MODELLERİ ---
 class LyricRequest(BaseModel):
     artist: str
     title: str
 
+class CleanRequest(BaseModel):
+    text: str
+
+# --- YARDIMCI FONKSİYONLAR ---
 def clean_with_gemini(dirty_text):
     if not GEMINI_API_KEY:
         return dirty_text
     
-    # DÜZELTME: Model ismini 'gemini-pro' olarak değiştirdik (Daha kararlı)
+    # Model: gemini-pro (Daha kararlı)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
     
     prompt = f"""
-    Aşağıdaki metin bir web sitesinden çekildi. İçinde menüler, reklamlar olabilir.
-    Sadece ŞARKI SÖZLERİNİ ayıkla, temizle ve kıtalara ayır.
+    Aşağıdaki metin bir fotoğraftan OCR ile okundu. Satır kaymaları ve gürültü olabilir.
+    Bu metni ŞARKI SÖZÜ formatında temizle, düzelt ve kıtalara ayır.
     Başlık yazma, yorum yapma. Sadece sözler.
     
     METİN:
     {dirty_text[:8000]}
     """
     
-    payload = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }]
-    }
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
     
     try:
         response = requests.post(url, json=payload, headers={'Content-Type': 'application/json'})
@@ -57,7 +58,7 @@ def clean_with_gemini(dirty_text):
             return data['candidates'][0]['content']['parts'][0]['text']
         else:
             print(f"Gemini API Hatası: {response.text}")
-            return dirty_text # Hata olursa ham metni döndür
+            return dirty_text
     except Exception as e:
         print(f"Bağlantı Hatası: {e}")
         return dirty_text
@@ -65,66 +66,45 @@ def clean_with_gemini(dirty_text):
 def scrape_lyrics(artist, title):
     query = f"{artist} {title} şarkı sözleri"
     print(f"Aranıyor: {query}")
-    
     try:
-        # DDGS kullanımı
         results = DDGS().text(query, max_results=3)
-        if not results:
-            return None
-            
-        first_result = results[0]
-        url = first_result['href']
+        if not results: return None
+        url = results[0]['href']
         print(f"Hedef Site: {url}")
-        
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0'}
+        headers = {'User-Agent': 'Mozilla/5.0'}
         page = requests.get(url, headers=headers, timeout=10)
-        
         soup = BeautifulSoup(page.content, 'html.parser')
-        
-        # Script ve style etiketlerini temizle
-        for script in soup(["script", "style"]):
-            script.decompose()
-            
+        for script in soup(["script", "style"]): script.decompose()
         text = soup.get_text()
-        
-        # Basit boşluk temizliği
         lines = (line.strip() for line in text.splitlines())
         chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        clean_text = '\n'.join(chunk for chunk in chunks if chunk)
-        
-        return clean_text
-        
+        return '\n'.join(chunk for chunk in chunks if chunk)
     except Exception as e:
         print(f"Scrape Hatası: {e}")
         return None
 
+# --- ENDPOINTLER ---
 @app.get("/")
 def read_root():
-    return {"status": "LyricMaster API is running"}
+    return {"status": "LyricMaster API with OCR Support Running"}
 
 @app.get("/get_lyrics")
 def get_lyrics(artist: str, title: str):
     cache_key = f"{artist.lower().strip()}_{title.lower().strip()}"
-    
-    # Cache Kontrol
     if cache_key in lyric_cache:
-        cached_item = lyric_cache[cache_key]
-        if time.time() - cached_item['timestamp'] < CACHE_DURATION:
-            return {"lyrics": cached_item['lyrics'], "source": "cache"}
+        if time.time() - lyric_cache[cache_key]['timestamp'] < CACHE_DURATION:
+            return {"lyrics": lyric_cache[cache_key]['lyrics'], "source": "cache"}
 
-    # Scrape İşlemi
     raw_lyrics = scrape_lyrics(artist, title)
-    
     if not raw_lyrics:
         raise HTTPException(status_code=404, detail="Lyrics not found")
     
-    # Temizleme
     final_lyrics = clean_with_gemini(raw_lyrics)
-    
-    # Cache Kayıt
-    lyric_cache[cache_key] = {
-        "lyrics": final_lyrics,
-        "timestamp": time.time()
-    }
-    
+    lyric_cache[cache_key] = {"lyrics": final_lyrics, "timestamp": time.time()}
     return {"lyrics": final_lyrics, "source": "web"}
+
+# YENİ EKLENEN ENDPOINT: OCR TEMİZLİKÇİSİ
+@app.post("/clean_raw_text")
+def clean_raw_text(request: CleanRequest):
+    cleaned_text = clean_with_gemini(request.text)
+    return {"cleaned_text": cleaned_text}
